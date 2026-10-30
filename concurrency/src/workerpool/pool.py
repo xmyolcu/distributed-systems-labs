@@ -15,8 +15,8 @@ class QueueFull(Exception):
 class _Task:
     fn: Callable[..., Any]
     args: tuple
-    # monotonic saat: duvar saati ayarlanırsa bile süre ölçümü bozulmaz.
-    enqueued_at: float
+    # Görev kuyruğa gerçekten girdiği an _StampedQueue tarafından yazılır (monotonic saat).
+    enqueued_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,20 @@ class PoolStats:
 _SENTINEL = None
 
 
+class _StampedQueue(queue.Queue):
+    """enqueued_at'i görevin kuyruğa GERÇEKTEN girdiği anda damgalar.
+
+    queue.Queue, _put'u kendi iç kilidi altında, yer açıldıktan sonra çağırır.
+    Böylece BLOCK'ta üreticinin put() içinde beklediği süre "kuyruk bekleme"
+    ölçümüne karışmaz (aksi halde submit gecikmesiyle çift sayılırdı).
+    """
+
+    def _put(self, item):
+        if item is not None:  # sentinel'e damga vurma
+            item.enqueued_at = time.monotonic()
+        super()._put(item)
+
+
 class WorkerPool:
     def __init__(
         self,
@@ -49,7 +63,7 @@ class WorkerPool:
             raise ValueError("queue_size >= 1 olmalı")
 
         self._policy = policy
-        self._queue: queue.Queue[_Task | None] = queue.Queue(maxsize=queue_size)
+        self._queue: queue.Queue[_Task | None] = _StampedQueue(maxsize=queue_size)
 
         # Sayaçlar ve kapanış durumu tek kilitle korunur; basit ve tutarlı snapshot verir.
         self._lock = threading.Lock()
@@ -89,7 +103,8 @@ class WorkerPool:
             self._inflight += 1
 
         try:
-            task = _Task(fn, args, time.monotonic())
+            # Zaman damgası burada vurulmaz; kuyruğa girerken _StampedQueue vurur.
+            task = _Task(fn, args)
             try:
                 if self._policy is BackpressurePolicy.BLOCK:
                     # Kilit dışında bekliyoruz: aksi halde worker'lar ve shutdown() kilitlenirdi.

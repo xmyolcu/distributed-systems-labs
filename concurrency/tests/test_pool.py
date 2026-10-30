@@ -171,3 +171,12 @@ def test_shutdown_while_producer_blocked_does_not_deadlock():
     assert not producer.is_alive() and not shutter.is_alive()
     assert late.is_set()
     assert pool.stats().completed == 3
+
+
+def test_block_wait_time_excludes_time_blocked_in_submit():
+    # 1 worker, kuyruk 1: üçüncü submit yaklaşık 0.2 sn bloklanır.
+    # Kuyrukta bekleme ~0.2 sn olmalı; bloklanma süresi eklenirse ~0.4 sn çıkar.
+    with WorkerPool(1, 1, BackpressurePolicy.BLOCK) as pool:
+        for _ in range(3):
+            pool.submit(time.sleep, 0.2)
+    assert pool.stats().p95_wait_s < 0.3
