@@ -9,6 +9,11 @@ Deney tasarımı:
 - İlk 'warmup' saniyesi ölçüme katılmaz.
 - Denemeler sırası karıştırılır (her tekrarda), zamanla oluşan sapma tek bir
   politikayı sistematik olarak etkilemesin diye.
+- Kapasite her tekrarın başında ve sonunda yeniden ölçülür. Hız çarpanları o tekrarın
+  başlangıç kapasitesine göre kurulur; kayma capacity_drift_pct sütununda kayıtlıdır.
+  Makinenin koşu sırasında yavaşlaması (zamanlayıcı birleştirme vb.) böylece görünür olur.
+- Kapasite DROP politikasıyla ölçülür: üretici bloklanmadığı için BLOCK'un uyandırma
+  maliyeti kapasite tahminine karışmaz.
 """
 import argparse
 import csv
@@ -22,11 +27,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from calibrate import NUM_WORKERS, QUEUE_SIZE, SERVICE_TIME_S, measure_capacity  # noqa: E402
+from calibrate import NUM_WORKERS, QUEUE_SIZE, SERVICE_TIME_S  # noqa: E402
 from workerpool import BackpressurePolicy, QueueFull, WorkerPool  # noqa: E402
 
 MULTIPLIERS = [0.25, 0.5, 0.75, 0.9, 1.0, 1.1, 1.5, 2.0]
 POLICIES = list(BackpressurePolicy)
+COOLDOWN_S = 2.0  # denemeler arası dinlenme
 
 FIELDS = [
     "policy", "rate_multiplier", "target_rate", "repeat",
@@ -35,6 +41,7 @@ FIELDS = [
     "submit_latency_mean_ms", "submit_latency_p95_ms",
     "schedule_lag_mean_ms", "schedule_lag_p95_ms",
     "achieved_offered_rate",
+    "capacity_start", "capacity_end", "capacity_drift_pct",
 ]
 
 
@@ -134,6 +141,17 @@ def run_trial(policy: BackpressurePolicy, target_rate: float,
     }
 
 
+def calibrate_capacity(warmup: float = 1.0, duration: float = 4.0, n: int = 3) -> float:
+    """Saf havuz kapasitesi: DROP + kapasiteyi çok aşan sabit hedef hız.
+
+    Üretici bloklanmaz, kuyruk hep dolu kalır; BLOCK'un uyandırma maliyeti
+    kapasite tahminine karışmaz. Hedef hız (1000/sn) kapasitenin üstünde olmalı.
+    """
+    vals = [run_trial(BackpressurePolicy.DROP, 1000.0, warmup, duration)["throughput"]
+            for _ in range(n)]
+    return sum(vals) / len(vals)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="1 tekrar, kısa süre (geliştirme)")
@@ -144,12 +162,9 @@ def main() -> None:
 
     if args.quick:
         args.repeats, args.duration, args.warmup = 1, 3.0, 1.0
-        capacity = measure_capacity(0.5, 1.5)
         out = ROOT / "results" / "benchmark_quick.csv"
     else:
-        capacity = sum(measure_capacity() for _ in range(3)) / 3
         out = ROOT / "results" / "benchmark.csv"
-    print(f"Kalibre kapasite: {capacity:.0f} görev/sn")
 
     out.parent.mkdir(exist_ok=True)
     rng = random.Random(42)
@@ -160,18 +175,31 @@ def main() -> None:
         writer = csv.DictWriter(f, fieldnames=FIELDS)
         writer.writeheader()
         for rep in range(1, args.repeats + 1):
+            # Her tekrarın başında ve sonunda kapasite ölçülür: kayma varsa görünür olur.
+            cap_start = calibrate_capacity()
+            print(f"--- Tekrar {rep}/{args.repeats}: kapasite (başlangıç) {cap_start:.0f} görev/sn")
             order = [(m, p) for m in MULTIPLIERS for p in POLICIES]
             rng.shuffle(order)  # sıra etkisini dağıtmak için
+            rows = []
             for mult, policy in order:
-                row = run_trial(policy, capacity * mult, args.warmup, args.duration)
-                row.update(rate_multiplier=mult, repeat=rep)
-                writer.writerow({k: row[k] for k in FIELDS})
-                f.flush()  # yarıda kesilirse o ana kadarki veri kalsın
+                row = run_trial(policy, cap_start * mult, args.warmup, args.duration)
+                row.update(rate_multiplier=mult, repeat=rep, capacity_start=round(cap_start, 1))
+                rows.append(row)
                 done += 1
                 print(f"[{done}/{total}] {policy.value:6s} x{mult:<4} "
                       f"throughput={row['throughput']:7.1f}  "
                       f"wait_p95={row['queue_wait_p95_ms']:7.2f} ms  "
                       f"dropped={row['dropped']} rejected={row['rejected']}")
+                time.sleep(COOLDOWN_S)
+            cap_end = calibrate_capacity()
+            drift = abs(cap_end - cap_start) / cap_start * 100
+            flag = "   <-- UYARI: kayma > %5, bu tekrarı eleyin" if drift > 5 else ""
+            print(f"--- Tekrar {rep}: kapasite {cap_start:.0f} -> {cap_end:.0f} (kayma %{drift:.1f}){flag}")
+            for row in rows:
+                row["capacity_end"] = round(cap_end, 1)
+                row["capacity_drift_pct"] = round(drift, 1)
+                writer.writerow({k: row[k] for k in FIELDS})
+            f.flush()  # her tekrar sonunda diske yaz
     print(f"Yazıldı: {out}")
 
 
