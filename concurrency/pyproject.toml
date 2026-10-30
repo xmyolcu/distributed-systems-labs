@@ -1,0 +1,9 @@
+[project]
+name = "workerpool"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+# src/ düzeni: paketi kurmadan testlerin import edebilmesi için.
+pythonpath = ["src"]
+testpaths = ["tests"]
