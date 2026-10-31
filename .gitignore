@@ -6,3 +6,5 @@ __pycache__/
 concurrency/results/benchmark_quick.csv
 concurrency/results/benchmark_run1_drifted.csv
 concurrency/results/benchmark_run1_drifted.csv
+concurrency/results/benchmark_run2_mixed.csv
+concurrency/results/rep_*.csv

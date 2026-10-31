@@ -158,6 +158,9 @@ def main() -> None:
     ap.add_argument("--repeats", type=int, default=5)
     ap.add_argument("--duration", type=float, default=8.0, help="deneme süresi (sn), ısınma dahil")
     ap.add_argument("--warmup", type=float, default=2.0)
+    ap.add_argument("--out", type=str, default=None, help="çıktı CSV yolu")
+    ap.add_argument("--first-repeat", type=int, default=1,
+                    help="tekrar numarası başlangıcı (her tekrar ayrı süreçte koşulurken)")
     args = ap.parse_args()
 
     if args.quick:
@@ -165,19 +168,22 @@ def main() -> None:
         out = ROOT / "results" / "benchmark_quick.csv"
     else:
         out = ROOT / "results" / "benchmark.csv"
+    if args.out:
+        out = Path(args.out)
 
     out.parent.mkdir(exist_ok=True)
-    rng = random.Random(42)
+    # Her süreç farklı ama tekrarlanabilir bir sıra alsın.
+    rng = random.Random(42 + args.first_repeat)
     total = args.repeats * len(MULTIPLIERS) * len(POLICIES)
     done = 0
 
     with out.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDS)
         writer.writeheader()
-        for rep in range(1, args.repeats + 1):
+        for rep in range(args.first_repeat, args.first_repeat + args.repeats):
             # Her tekrarın başında ve sonunda kapasite ölçülür: kayma varsa görünür olur.
             cap_start = calibrate_capacity()
-            print(f"--- Tekrar {rep}/{args.repeats}: kapasite (başlangıç) {cap_start:.0f} görev/sn")
+            print(f"--- Tekrar {rep}: kapasite (başlangıç) {cap_start:.0f} görev/sn")
             order = [(m, p) for m in MULTIPLIERS for p in POLICIES]
             rng.shuffle(order)  # sıra etkisini dağıtmak için
             rows = []
